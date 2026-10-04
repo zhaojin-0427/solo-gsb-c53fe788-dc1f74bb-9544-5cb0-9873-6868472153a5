@@ -25,7 +25,10 @@ Rules (see README)::
 Illegal layers and out-of-bounds coordinates are *violations*, never
 rejected requests (HTTP 422 is reserved for malformed input).  Cross-net
 rules only compare in-bounds cells on legal layers; blocked cells still
-take part in the comparison.
+take part in the comparison.  Adjacency is direction-independent: each
+undirected orthogonal edge is merged once, and every net pair meeting
+across it is reported a single time with the lower net number first,
+no matter which end of the edge either net occupies.
 """
 from __future__ import annotations
 
@@ -221,20 +224,31 @@ def inspect_board(req: InspectRequest) -> InspectResponse:
             at_nb = occupied.get(nb)
             if not at_nb:
                 continue
-            for i in nets_at:
-                for j, jsteps in at_nb.items():
-                    if j <= i:  # undirected pair, in net order
+            # direction-independent merge: either net of a conflicting
+            # pair may sit on either end of the edge (the lower-numbered
+            # net is not necessarily on the left/above cell), so pool
+            # every net present on the edge and report each unordered
+            # pair that meets ACROSS it -- one net on each end -- with
+            # the lower net number first, exactly once per pair
+            edge_nets = sorted(set(at) | set(at_nb))
+            for a in range(len(edge_nets)):
+                for b in range(a + 1, len(edge_nets)):
+                    i, j = edge_nets[a], edge_nets[b]
+                    across = (i in at and j in at_nb) or (
+                        j in at and i in at_nb
+                    )
+                    if not across:
                         continue
                     # a net may occupy both ends of the edge (or revisit
                     # one end): keep every visit of each net on this edge
-                    isteps = sorted(at[i] + list(at_nb.get(i, ())))
-                    jall = sorted(list(jsteps) + list(at.get(j, ())))
+                    isteps = sorted(at.get(i, []) + at_nb.get(i, []))
+                    jsteps = sorted(at.get(j, []) + at_nb.get(j, []))
                     first, second = sorted((cell, nb))
                     violations.append(
                         InspectViolation(
                             rule=RULE_CROSS_ADJACENT,
                             nets=[i, j],
-                            steps=[isteps, jall],
+                            steps=[isteps, jsteps],
                             cells=[_vcell(first), _vcell(second)],
                         )
                     )
