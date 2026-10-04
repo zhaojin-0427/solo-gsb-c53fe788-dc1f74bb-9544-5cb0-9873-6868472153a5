@@ -26,6 +26,15 @@ Illegal layers and out-of-bounds coordinates are *violations*, never
 rejected requests (HTTP 422 is reserved for malformed input).  Cross-net
 rules only compare in-bounds cells on legal layers; blocked cells still
 take part in the comparison.
+
+Cross-net adjacency is direction independent: every undirected
+orthogonal edge of the board is enumerated exactly once and each
+*unordered* net pair that faces the other net across that edge produces
+exactly one violation, regardless of which net has the smaller index or
+which side of the edge it occupies.  Relying on "only report when the
+left/upper net has the smaller index" silently missed conflicts whenever
+a low-numbered net was routed to the right of or below a higher-numbered
+net.
 """
 from __future__ import annotations
 
@@ -199,6 +208,9 @@ def inspect_board(req: InspectRequest) -> InspectResponse:
             )
 
     # ---- cross-net rules (in-bounds legal-layer cells only) -------------
+    # Each undirected orthogonal edge is enumerated exactly once by looking
+    # only at the +x/+y neighbour (a pair A|B is never re-examined as B|A),
+    # making the audit independent of the direction the nets were routed in.
     for cell, at in occupied.items():
         nets_at = sorted(at)
         # coincidence: every pair of distinct nets sharing the cell
@@ -214,27 +226,48 @@ def inspect_board(req: InspectRequest) -> InspectResponse:
                         cells=[_vcell(cell), _vcell(cell)],
                     )
                 )
-        # adjacency: enumerate each undirected orthogonal edge once
+        # adjacency on this undirected edge: collect which nets occupy which
+        # of the two endpoints, then report, once per edge, every net pair
+        # that faces the other net across the edge.  Net order (i < j)
+        # decides the reporting order but never whether a pair is reported,
+        # so a low-numbered net routed to the right of/below a higher one is
+        # caught just the same.
         x, y, layer = cell
         for dx, dy in ((1, 0), (0, 1)):
             nb = (x + dx, y + dy, layer)
             at_nb = occupied.get(nb)
             if not at_nb:
                 continue
-            for i in nets_at:
-                for j, jsteps in at_nb.items():
-                    if j <= i:  # undirected pair, in net order
+            net_ids = sorted(set(at) | set(at_nb))
+            first, second = sorted((cell, nb))
+            for a in range(len(net_ids)):
+                for b in range(a + 1, len(net_ids)):
+                    i, j = net_ids[a], net_ids[b]
+                    # each net must actually sit on an endpoint: the pair
+                    # faces across the edge iff one occupies an endpoint the
+                    # other does not (in either orientation).  Two nets that
+                    # merely coincide at a single endpoint are handled by
+                    # CROSS_NET_COINCIDE, not here.
+                    i_left, i_right = i in at, i in at_nb
+                    j_left, j_right = j in at, j in at_nb
+                    if not (
+                        (i_left and j_right) or (j_left and i_right)
+                    ):
                         continue
-                    # a net may occupy both ends of the edge (or revisit
-                    # one end): keep every visit of each net on this edge
-                    isteps = sorted(at[i] + list(at_nb.get(i, ())))
-                    jall = sorted(list(jsteps) + list(at.get(j, ())))
-                    first, second = sorted((cell, nb))
+                    # keep every visit of each net on this edge, including
+                    # repeated visits of one endpoint or a net occupying
+                    # both ends of the edge
+                    isteps = sorted(
+                        list(at.get(i, ())) + list(at_nb.get(i, ()))
+                    )
+                    jsteps = sorted(
+                        list(at.get(j, ())) + list(at_nb.get(j, ()))
+                    )
                     violations.append(
                         InspectViolation(
                             rule=RULE_CROSS_ADJACENT,
                             nets=[i, j],
-                            steps=[isteps, jall],
+                            steps=[isteps, jsteps],
                             cells=[_vcell(first), _vcell(second)],
                         )
                     )

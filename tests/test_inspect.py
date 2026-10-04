@@ -305,6 +305,125 @@ def test_one_net_error_does_not_stop_other_checks_and_nets():
 
 # ------------------------------ cross-net rules -----------------------------
 
+def test_adjacency_independent_of_net_order_and_direction():
+    # two parallel straight traces one cell apart: the conflicts must be
+    # reported whichever net has the smaller index and whichever side
+    # (right/below) it runs on -- the old +x/+y scan filtered by net order
+    # and silently returned legal=true for these boards
+    parallel_nets = [
+        net({"x": 0, "y": 0, "layer": 0}, {"x": 2, "y": 0, "layer": 0}),
+        net({"x": 0, "y": 1, "layer": 0}, {"x": 2, "y": 1, "layer": 0}),
+    ]
+    horizontal_paths = [
+        [{"x": x, "y": 0, "layer": 0} for x in range(3)],
+        [{"x": x, "y": 1, "layer": 0} for x in range(3)],
+    ]
+    vertical_nets = [
+        net({"x": 0, "y": 0, "layer": 0}, {"x": 0, "y": 2, "layer": 0}),
+        net({"x": 1, "y": 0, "layer": 0}, {"x": 1, "y": 2, "layer": 0}),
+    ]
+    vertical_paths = [
+        [{"x": 0, "y": y, "layer": 0} for y in range(3)],
+        [{"x": 1, "y": y, "layer": 0} for y in range(3)],
+    ]
+    for nets, paths in (
+        (parallel_nets, horizontal_paths),
+        (parallel_nets[::-1], horizontal_paths[::-1]),  # low net below
+        (vertical_nets, vertical_paths),
+        (vertical_nets[::-1], vertical_paths[::-1]),    # low net to the right
+    ):
+        body = {"width": 3, "height": 3, "nets": nets, "paths": paths}
+        resp = inspect(body)
+        assert resp["legal"] is False, body
+        adj = rules(resp, "CROSS_NET_ADJACENT")
+        assert len(adj) == 3
+        assert all(v["nets"] == [0, 1] for v in adj)
+
+
+def test_several_net_pairs_on_same_edge_reported_separately():
+    # edge (1,0,0)-(1,1,0): net 0 and net 2 both occupy the top endpoint
+    # (they coincide with each other there), net 1 the bottom one.  Each
+    # cross-net pair facing across the edge is its own violation; two nets
+    # that merely share one endpoint never get an adjacency entry.
+    p = {"x": 1, "y": 0, "layer": 0}
+    body = {
+        "width": 5, "height": 3,
+        "nets": [
+            net({"x": 0, "y": 0, "layer": 0}, {"x": 2, "y": 0, "layer": 0}),
+            net({"x": 0, "y": 2, "layer": 0}, {"x": 2, "y": 2, "layer": 0}),
+            net({"x": 4, "y": 0, "layer": 0}, {"x": 1, "y": 0, "layer": 0}),
+        ],
+        "paths": [
+            [{"x": 0, "y": 0, "layer": 0}, dict(p),
+             {"x": 2, "y": 0, "layer": 0}],
+            [{"x": 0, "y": 2, "layer": 0},
+             {"x": 1, "y": 1, "layer": 0},
+             {"x": 2, "y": 2, "layer": 0}],
+            [{"x": 4, "y": 0, "layer": 0},
+             {"x": 3, "y": 0, "layer": 0}, dict(p)],
+        ],
+    }
+    resp = inspect(body)
+    edge = [(1, 0, 0), (1, 1, 0)]
+    # on THIS edge both net pairs facing across it are reported separately,
+    # one per net pair, while nets 0 and 2 (which only share the top
+    # endpoint) do not claim the edge as an adjacency
+    on_edge = {
+        tuple(v["nets"]): v["steps"]
+        for v in rules(resp, "CROSS_NET_ADJACENT")
+        if cells_of(v) == edge
+    }
+    assert sorted(on_edge) == [(0, 1), (1, 2)]
+    assert on_edge[(0, 1)] == [[1], [1]]
+    assert on_edge[(1, 2)] == [[1], [2]]
+    # nets 0/2 extending along the row next to the shared cell still face
+    # each other across the row edges (different cells, different nets)
+    row_pairs = sorted(
+        tuple(v["nets"]) for v in rules(resp, "CROSS_NET_ADJACENT")
+    )
+    assert (0, 2) in row_pairs
+    assert all(
+        cells_of(v) != edge
+        for v in rules(resp, "CROSS_NET_ADJACENT") if v["nets"] == [0, 2]
+    )
+    # the same-endpoint coincidence is its own rule, one pair only
+    assert sorted(tuple(v["nets"])
+                  for v in rules(resp, "CROSS_NET_COINCIDE")) == [(0, 2)]
+
+
+def test_adjacency_keeps_every_step_of_repeated_visits():
+    # net 0 occupies (1,1,0) twice (steps 1 and 4); net 1 sits on (1,2,0)
+    # at steps 1 and 4.  Every visiting step number is kept per net.
+    body = {
+        "width": 4, "height": 4,
+        "nets": [
+            net({"x": 0, "y": 1, "layer": 0}, {"x": 3, "y": 1, "layer": 0}),
+            net({"x": 0, "y": 3, "layer": 0}, {"x": 2, "y": 3, "layer": 0}),
+        ],
+        "paths": [
+            [
+                {"x": 0, "y": 1, "layer": 0},
+                {"x": 1, "y": 1, "layer": 0},
+                {"x": 2, "y": 0, "layer": 0},
+                {"x": 2, "y": 1, "layer": 0},
+                {"x": 1, "y": 1, "layer": 0},  # revisit step 1
+                {"x": 3, "y": 1, "layer": 0},
+            ],
+            [
+                {"x": 0, "y": 3, "layer": 0},
+                {"x": 1, "y": 2, "layer": 0},
+                {"x": 2, "y": 2, "layer": 0},
+                {"x": 2, "y": 3, "layer": 0},
+            ],
+        ],
+    }
+    resp = inspect(body)
+    adj = rules(resp, "CROSS_NET_ADJACENT")
+    by_edge = {tuple(cells_of(v)): v["steps"] for v in adj}
+    assert by_edge[((1, 1, 0), (1, 2, 0))] == [[1, 4], [1]]
+    assert by_edge[((2, 1, 0), (2, 2, 0))] == [[3], [2]]
+
+
 def test_cross_net_coincide_and_adjacent():
     body = {
         "width": 4, "height": 5,
@@ -331,14 +450,19 @@ def test_cross_net_coincide_and_adjacent():
     assert cells_of(coin[0]) == [(1, 1, 0), (1, 1, 0)]
     adj = rules(resp, "CROSS_NET_ADJACENT")
     edges = sorted(cells_of(v) for v in adj)
+    # the edge (1,1)-(2,1) is detected regardless of which net sits on
+    # which side: net 1 coincides with net 0 at (1,1) while net 0 keeps
+    # running right to (2,1)
     assert edges == [
         [(0, 1, 0), (1, 1, 0)],
+        [(1, 1, 0), (2, 1, 0)],
         [(2, 1, 0), (2, 2, 0)],
         [(3, 1, 0), (3, 2, 0)],
     ]
     assert all(v["nets"] == [0, 1] for v in adj)
     by_edge = {tuple(cells_of(v)): v["steps"] for v in adj}
     assert by_edge[((0, 1, 0), (1, 1, 0))] == [[0, 1], [1]]
+    assert by_edge[((1, 1, 0), (2, 1, 0))] == [[1, 2], [1]]
     assert by_edge[((2, 1, 0), (2, 2, 0))] == [[2], [2]]
     assert by_edge[((3, 1, 0), (3, 2, 0))] == [[3], [3]]
 
